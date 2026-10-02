@@ -1,6 +1,4 @@
-import Anthropic from "@anthropic-ai/sdk";
-import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
-import { anthropic, INTERVIEWER_MODEL } from "./anthropic";
+import { runStructured } from "./ollama";
 import { DebriefSchema, type Debrief } from "./schemas";
 import type { CaseContent } from "./schemas";
 import type { TranscriptTurn } from "./types";
@@ -40,22 +38,14 @@ Score each dimension 0-10 against the rubric above. Each critique should be spec
     .map((t) => `[${t.phase}] ${t.role === "candidate" ? "CANDIDATE" : "INTERVIEWER"}: ${t.content}`)
     .join("\n\n");
 
-  const response = await anthropic.messages.parse({
-    model: INTERVIEWER_MODEL,
-    max_tokens: 4096,
-    output_config: { effort: "high", format: zodOutputFormat(DebriefSchema) },
+  return runStructured({
+    schema: DebriefSchema,
     system: systemText,
     messages: [
       {
         role: "user",
         content: `Here is the full transcript of the interview:\n\n${transcriptText || "(no transcript - candidate ended immediately)"}`,
       },
-    ] satisfies Anthropic.MessageParam[],
+    ],
   });
-
-  const debrief = response.parsed_output;
-  if (!debrief) {
-    throw new Error("Grading engine failed to produce structured output");
-  }
-  return debrief;
 }

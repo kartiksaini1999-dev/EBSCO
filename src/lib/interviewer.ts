@@ -1,6 +1,5 @@
-import Anthropic from "@anthropic-ai/sdk";
-import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
-import { anthropic, INTERVIEWER_MODEL } from "./anthropic";
+import type { Message } from "ollama";
+import { runStructured } from "./ollama";
 import { InterviewerTurnSchema, type InterviewerTurn } from "./schemas";
 import type { CaseContent } from "./schemas";
 import type { Phase, Tone, TranscriptTurn } from "./types";
@@ -120,25 +119,18 @@ ${formatCaseContext(caseContent, revealedExhibitIds)}
 
 Respond with structured output matching the required schema. "reply" is the ONLY text the candidate will ever see - everything else is control data for the app.`;
 
-  const history: Anthropic.MessageParam[] = transcript
+  const history: Message[] = transcript
     .filter((t) => t.role !== "system")
     .map((t) => ({
       role: t.role === "candidate" ? "user" : "assistant",
       content: t.content,
     }));
 
-  const response = await anthropic.messages.parse({
-    model: INTERVIEWER_MODEL,
-    max_tokens: 4096,
-    output_config: { effort: "high", format: zodOutputFormat(InterviewerTurnSchema) },
-    system: [{ type: "text", text: systemText, cache_control: { type: "ephemeral" } }],
+  const turn = await runStructured({
+    schema: InterviewerTurnSchema,
+    system: systemText,
     messages: [...history, { role: "user", content: candidateMessage }],
   });
-
-  const turn = response.parsed_output;
-  if (!turn) {
-    throw new Error("Interviewer engine failed to produce structured output");
-  }
 
   const stillUnrevealed = caseContent.exhibits.filter((e) => !revealedExhibitIds.includes(e.id));
   const validIds = new Set(stillUnrevealed.map((e) => e.id));

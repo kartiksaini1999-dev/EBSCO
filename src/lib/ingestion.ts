@@ -1,7 +1,5 @@
-import Anthropic from "@anthropic-ai/sdk";
-import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
-import { anthropic, INTERVIEWER_MODEL } from "./anthropic";
+import { runStructured } from "./ollama";
 import { IngestedCaseSchema, type IngestedCase } from "./schemas";
 
 const INGEST_SYSTEM_PROMPT = `You are extracting a structured consulting case-interview record from raw text pulled from a case book (PDF or pasted text). Case books vary widely in structure - some are Q&A transcripts, some are narrative prose with embedded exhibits/tables, some put the answer key or exhibits at the very end referenced by callback, some use headers like "Interviewer:"/"Candidate:" for a sample dialogue.
@@ -18,30 +16,25 @@ Guidance per field:
 - model_answer: the ideal final recommendation/synthesis, as given in the source's answer key if present, else a well-reasoned synthesis from the available data.
 - grading_rubric: strong vs weak criteria for structure, math, and synthesis - derive from the source if it has grading notes, else construct reasonable criteria from the case's content.
 
-Set parse_confidence low (below 0.7) whenever you had to infer rather than extract a field directly, and use parse_notes to flag exactly which fields were uncertain or inferred, so a human can review before this case goes live. Be honest about uncertainty - this flagging is the whole point, don't skip it to seem more confident.`;
+Set parse_confidence low (below 0.7) whenever you had to infer rather than extract a field directly, and use parse_notes to flag exactly which fields were uncertain or inferred, so a human can review before this case goes live. Be honest about uncertainty - this flagging is the whole point, don't skip it to seem more confident.
+
+Reply with ONLY the JSON object matching the schema - no commentary before or after.`;
 
 export async function parseCaseFromText(
   rawText: string,
   sourceLabel: string,
 ): Promise<IngestedCase> {
-  const response = await anthropic.messages.parse({
-    model: INTERVIEWER_MODEL,
-    max_tokens: 16000,
-    output_config: { effort: "high", format: zodOutputFormat(IngestedCaseSchema) },
+  return runStructured({
+    schema: IngestedCaseSchema,
     system: INGEST_SYSTEM_PROMPT,
     messages: [
       {
         role: "user",
         content: `Source: ${sourceLabel}\n\n--- RAW TEXT ---\n${rawText}`,
       },
-    ] satisfies Anthropic.MessageParam[],
+    ],
+    temperature: 0.2,
   });
-
-  const parsed = response.parsed_output;
-  if (!parsed) {
-    throw new Error("Ingestion engine failed to produce structured output");
-  }
-  return parsed;
 }
 
 const CaseSegmentsSchema = z.object({
@@ -64,25 +57,33 @@ const CaseSegmentsSchema = z.object({
  * Splits a multi-case document (a whole case book, or a chapter of one) into
  * per-case text segments so each can be run through parseCaseFromText individually.
  * Returns a single segment spanning the whole text if only one case is detected.
+ *
+ * Local models are noticeably less reliable at precise character counting than
+ * hosted frontier models - offsets are clamped defensively, but for a large or
+ * unusually formatted book, double-check the resulting segments (or the parsed
+ * cases' parse_notes) in /admin/cases rather than trusting the split blindly.
  */
 export async function splitIntoCaseSegments(
   rawText: string,
 ): Promise<{ title: string; rawText: string }[]> {
-  const response = await anthropic.messages.parse({
-    model: INTERVIEWER_MODEL,
-    max_tokens: 8192,
-    output_config: { effort: "medium", format: zodOutputFormat(CaseSegmentsSchema) },
-    system: `You are splitting a case book document into individual case-interview segments. The text may contain one case or many (e.g. a table of contents, multiple chapters each a self-contained case, an appendix of answer keys that belongs with earlier cases). Identify each distinct case and return start/end character offsets (0-indexed, end exclusive) into the EXACT source text provided - offsets must be precise since they'll be used to slice the raw string. If an answer key/exhibits appendix at the end belongs to an earlier case, include that appendix's range as part of that same case's segment (segments may be non-contiguous in spirit, but since this schema only allows one contiguous range per segment, prefer to span from the case's start through to the end of whatever appendix material belongs to it, even if that means including intervening unrelated content - a human will review afterward). If the whole document is a single case, return exactly one segment covering the whole text.`,
-    messages: [
-      {
-        role: "user",
-        content: `Total length: ${rawText.length} characters.\n\n--- SOURCE TEXT ---\n${rawText}`,
-      },
-    ] satisfies Anthropic.MessageParam[],
-  });
+  let parsed;
+  try {
+    parsed = await runStructured({
+      schema: CaseSegmentsSchema,
+      system: `You are splitting a case book document into individual case-interview segments. The text may contain one case or many (e.g. a table of contents, multiple chapters each a self-contained case, an appendix of answer keys that belongs with earlier cases). Identify each distinct case and return start/end character offsets (0-indexed, end exclusive) into the EXACT source text provided - offsets must be precise since they'll be used to slice the raw string. If an answer key/exhibits appendix at the end belongs to an earlier case, include that appendix's range as part of that same case's segment (segments may be non-contiguous in spirit, but since this schema only allows one contiguous range per segment, prefer to span from the case's start through to the end of whatever appendix material belongs to it, even if that means including intervening unrelated content - a human will review afterward). If the whole document is a single case, return exactly one segment covering the whole text. Reply with ONLY the JSON object matching the schema.`,
+      messages: [
+        {
+          role: "user",
+          content: `Total length: ${rawText.length} characters.\n\n--- SOURCE TEXT ---\n${rawText}`,
+        },
+      ],
+      temperature: 0.1,
+    });
+  } catch {
+    return [{ title: "Untitled case", rawText }];
+  }
 
-  const parsed = response.parsed_output;
-  if (!parsed || parsed.segments.length === 0) {
+  if (parsed.segments.length === 0) {
     return [{ title: "Untitled case", rawText }];
   }
 
