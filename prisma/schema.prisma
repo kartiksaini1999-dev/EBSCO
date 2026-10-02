@@ -1,0 +1,69 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum CaseStatus {
+  needs_review
+  live
+}
+
+model Case {
+  id        String @id @default(cuid())
+  title     String
+  source    String // which book/set it came from
+  industry  String
+  caseType  String // profitability | market_entry | ma | market_sizing | growth_strategy | operations | pricing | other
+  difficulty String // easy | medium | hard
+
+  prompt String // opening question shown to the candidate
+
+  // Case content that must never be sent to the client up front.
+  // Each is JSON; see src/lib/types.ts for the shape.
+  clarifyingQaBank  Json // {question_pattern, answer}[]
+  frameworkGuidance String // what a strong structure looks like (never shown to candidate)
+  exhibits          Json // {id, trigger_condition, exhibit_type, exhibit_content, order}[]
+  mathSteps         Json // {id, description, expected_value, unit, depends_on}[]
+  modelAnswer       String
+  gradingRubric     Json // {structure: {...}, math: {...}, synthesis: {...}}
+
+  status          CaseStatus @default(needs_review)
+  parseConfidence Float? // 0-1, set by ingestion; null for hand-written cases
+  parseNotes      String? // ingestion flags for manual review
+  rawSourceText   String? // original extracted text, kept for admin reference
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  attempts Attempt[]
+}
+
+model Attempt {
+  id     String @id @default(cuid())
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  tone  String @default("strict") // strict | coaching
+  phase String @default("clarifying") // clarifying | framework | data | math | synthesis | debrief | done
+
+  transcript       Json   @default("[]") // TranscriptTurn[]
+  revealedExhibits Json   @default("[]") // ids of exhibits already shown this attempt
+
+  structureScore    Int?
+  mathScore         Int?
+  synthesisScore    Int?
+  structureCritique String?
+  mathCritique      String?
+  synthesisCritique String?
+  overallFeedback   String?
+
+  startedAt       DateTime  @default(now())
+  completedAt     DateTime?
+  durationSeconds Int?
+
+  createdAt DateTime @default(now())
+}
