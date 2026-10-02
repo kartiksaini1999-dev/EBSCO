@@ -1,11 +1,28 @@
 import { Ollama } from "ollama";
 import type { Message } from "ollama";
+import { Agent, fetch as undiciFetch } from "undici";
 import { z, type ZodType } from "zod";
+
+// Local CPU inference with a large context window can legitimately take
+// several minutes per request, especially for the longer structured-output
+// schemas (debrief, ingestion). undici's default headers/body timeouts
+// (~5 min) are tuned for network APIs, not local model generation, so they
+// need to be raised well past that rather than left at their default.
+const SLOW_LOCAL_INFERENCE_TIMEOUT_MS = 20 * 60 * 1000;
+const longTimeoutAgent = new Agent({
+  headersTimeout: SLOW_LOCAL_INFERENCE_TIMEOUT_MS,
+  bodyTimeout: SLOW_LOCAL_INFERENCE_TIMEOUT_MS,
+});
 
 const globalForOllama = globalThis as unknown as { ollama: Ollama | undefined };
 
 export const ollama =
-  globalForOllama.ollama ?? new Ollama({ host: process.env.OLLAMA_HOST || "http://localhost:11434" });
+  globalForOllama.ollama ??
+  new Ollama({
+    host: process.env.OLLAMA_HOST || "http://localhost:11434",
+    fetch: (input, init) =>
+      undiciFetch(input as string, { ...init, dispatcher: longTimeoutAgent } as never) as unknown as Promise<Response>,
+  });
 
 if (process.env.NODE_ENV !== "production") globalForOllama.ollama = ollama;
 
